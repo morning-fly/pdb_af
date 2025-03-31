@@ -11,6 +11,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from pathlib import Path
 from typing import Union, Optional, Dict, Tuple, List
+from loguru import logger
 
 def main():
     parser = argparse.ArgumentParser(
@@ -34,15 +35,23 @@ def main():
     pdb_dir_path = Path(args.pdb)
     af_dir_path = Path(args.af)
     
+    log = Path.cwd() / f"{Path(__file__).stem}.log"
+    logger.add(log, rotation="1 MB", compression="zip")    
+    
+    logger.info(f"Started getting info from PDB")
     pdb_info_df = get_all_pdb_info()
     all_chain_info_df = split_chain_in_dataframe(pdb_info_df=pdb_info_df)
     remove_dup_df = all_chain_info_df.sort_values("RESOLUTION").drop_duplicates(subset="UNIPROT ID", keep="first")
+    logger.info(f"Finished getting info from PDB")
     
+    logger.info(f"Started checking local database")
     if check_local_pdb_db(
         local_db_path=pdb_dir_path, 
         pdb_info_df=pdb_info_df):
         for pdb_id in check_local_pdb_db:
+            logger.info(f"Download: {pdb_id}")
             download_pdb(local_db_path=pdb_dir_path, pdb_id=pdb_id)
+    logger.info(f"Finished checking local database")
     
     results = []
     parser = PDBParser(QUIET=True)
@@ -58,7 +67,7 @@ def main():
         download_af_structure(out_dir_path=af_dir_path, uniprot_id=uniprot_id)
         af_pdb = get_structure_in_dir(directory=af_dir_path, name=uniprot_id)
         af_structure = parser.get_structure('af', af_pdb)
-        af_chain = exp_structure[0]["A"]
+        af_chain = af_structure[0]["A"]
         
         trimmed_residues = trim_af_structure(exp_chain, af_chain)
         trimmed_af_chain = create_chain_from_residues(trimmed_residues, chain_id)
@@ -74,6 +83,7 @@ def main():
             'af_secondary': af_ss
         }
         results.append(result)
+        logger.info(f"Analysis of {pdb_id}_{chain_id} is completed")
         
     results_df = pd.DataFrame(results)
     results_df.to_csv("ss_comparison_allchains.csv", index=False)
@@ -270,6 +280,7 @@ def split_chain_in_dataframe(pdb_info_df: pd.DataFrame) -> pd.DataFrame:
             row_dict["CHAIN"] = chain
             row_dict["UNIPROT ID"] = main_uni_id
             out_df = pd.concat([out_df, pd.DataFrame([row_dict])], ignore_index=True)
+            logger.info(f"PDB ID of {pdb_id}_{chain} is converted to Uniprot ID")
             
     out_df.to_csv("all_chain_pdb_info.csv")
     
