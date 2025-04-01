@@ -253,6 +253,25 @@ def map_pdb_to_uniprot_allchains(pdb_id: str) -> Optional[Dict[str, Dict[str, in
                     
     return chain_to_uniprot
 
+def convert_row(row_dict: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Convert a single row (as a dictionary) into multiple rows,
+    one per chain mapping.
+    """
+    pdb_id = str(row_dict["IDCODE"])
+    mapping_dict = map_pdb_to_uniprot_allchains(pdb_id=pdb_id)
+    results = []
+    if mapping_dict:
+        for chain, uni_dict in mapping_dict.items():
+            new_row = row_dict.copy()
+            # Select the UniProt ID with the highest mapping value
+            main_uni_id = max(uni_dict, key=uni_dict.get)
+            new_row["CHAIN"] = chain
+            new_row["UNIPROT ID"] = main_uni_id
+            logger.info(f"PDB {pdb_id} chain {chain} converted to UniProt ID {main_uni_id}")
+            results.append(new_row)
+    return results
+
 def split_chain_in_dataframe(pdb_info_df: pd.DataFrame) -> pd.DataFrame:
     """
     Expand the input DataFrame by splitting each PDB entry into separate rows
@@ -264,25 +283,6 @@ def split_chain_in_dataframe(pdb_info_df: pd.DataFrame) -> pd.DataFrame:
     Returns:
         pd.DataFrame: Expanded DataFrame with additional "CHAIN" and "UNIPROT ID" columns.
     """
-    def convert_row(row_dict: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """
-        Convert a single row (as a dictionary) into multiple rows,
-        one per chain mapping.
-        """
-        pdb_id = str(row_dict["IDCODE"])
-        mapping_dict = map_pdb_to_uniprot_allchains(pdb_id=pdb_id)
-        results = []
-        if mapping_dict:
-            for chain, uni_dict in mapping_dict.items():
-                # Create a copy to avoid modifying the original row dictionary
-                new_row = row_dict.copy()
-                # Select the UniProt ID with the highest mapping value
-                main_uni_id = max(uni_dict, key=uni_dict.get)
-                new_row["CHAIN"] = chain
-                new_row["UNIPROT ID"] = main_uni_id
-                logger.info(f"PDB {pdb_id} chain {chain} converted to UniProt ID {main_uni_id}")
-                results.append(new_row)
-        return results
 
     # Convert DataFrame rows to a list of dictionaries using itertuples for speed
     pdb_info_rows = [row._asdict() for row in pdb_info_df.itertuples(index=False)]
