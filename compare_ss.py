@@ -10,8 +10,9 @@ from Bio.PDB.Residue import Residue
 import pandas as pd
 import matplotlib.pyplot as plt
 from pathlib import Path
-from typing import Union, Optional, Dict, Tuple, List
+from typing import Union, Optional, Dict, Tuple, List, Any
 from loguru import logger
+from multiprocessing import Pool
 
 def main():
     parser = argparse.ArgumentParser(
@@ -256,33 +257,44 @@ def split_chain_in_dataframe(pdb_info_df: pd.DataFrame) -> pd.DataFrame:
     """
     Expand the input DataFrame by splitting each PDB entry into separate rows
     for each chain, and add the corresponding UniProt ID with the longest mapping.
-
+    
     Args:
         pdb_info_df (pd.DataFrame): Original DataFrame with at least an "IDCODE" column.
-
+    
     Returns:
         pd.DataFrame: Expanded DataFrame with additional "CHAIN" and "UNIPROT ID" columns.
     """
-    columns = list(pdb_info_df.columns)
-    columns[1:1] = ["CHAIN", "UNIPROT ID"]
-    out_df = pd.DataFrame(columns=columns)
-    
-    for _, row in pdb_info_df.iterrows():
-        row_dict = row.to_dict()
+    def convert_row(row_dict: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Convert a single row (as a dictionary) into multiple rows,
+        one per chain mapping.
+        """
         pdb_id = str(row_dict["IDCODE"])
         mapping_dict = map_pdb_to_uniprot_allchains(pdb_id=pdb_id)
-        
-        if not mapping_dict:
-            continue  # Skip if mapping failed or was empty
+        results = []
+        if mapping_dict:
+            for chain, uni_dict in mapping_dict.items():
+                # Create a copy to avoid modifying the original row dictionary
+                new_row = row_dict.copy()
+                # Select the UniProt ID with the highest mapping value
+                main_uni_id = max(uni_dict, key=uni_dict.get)
+                new_row["CHAIN"] = chain
+                new_row["UNIPROT ID"] = main_uni_id
+                logger.info(f"PDB {pdb_id} chain {chain} converted to UniProt ID {main_uni_id}")
+                results.append(new_row)
+        return results
 
-        for chain, uni_dict in mapping_dict.items():
-            main_uni_id = max(uni_dict, key=uni_dict.get)
-            row_dict["CHAIN"] = chain
-            row_dict["UNIPROT ID"] = main_uni_id
-            out_df = pd.concat([out_df, pd.DataFrame([row_dict])], ignore_index=True)
-            logger.info(f"PDB ID of {pdb_id}_{chain} is converted to Uniprot ID")
-            
-    out_df.to_csv("all_chain_pdb_info.csv")
+    # Convert DataFrame rows to a list of dictionaries using itertuples for speed
+    pdb_info_rows = [row._asdict() for row in pdb_info_df.itertuples(index=False)]
+    
+    with Pool(processes=16) as pool:
+        results = pool.map(convert_row, pdb_info_rows)
+    
+    # Flatten the list of lists into a single list of dictionaries
+    flat_results = [item for sublist in results for item in sublist]
+    out_df = pd.DataFrame(flat_results)
+    
+    out_df.to_csv("all_chain_pdb_info.csv", index=False)
     
     return out_df
 
