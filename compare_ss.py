@@ -46,12 +46,13 @@ def main():
     log = Path.cwd() / f"{Path(__file__).stem}.log"
     logger.add(log, rotation="1 MB", compression="zip")    
     
-    if not args.csv:
+    logger.info(f"Started getting info from PDB")
+    pdb_info_df = get_all_pdb_info()
+    
+    if args.csv:
         csv_path = Path(args.csv)
         all_chain_info_df = pd.read_csv(csv_path)
     else:
-        logger.info(f"Started getting info from PDB")
-        pdb_info_df = get_all_pdb_info()
         all_chain_info_df = split_chain_in_dataframe(pdb_info_df=pdb_info_df)
         
     remove_dup_df = all_chain_info_df.sort_values("RESOLUTION").drop_duplicates(subset="UNIPROT ID", keep="first")
