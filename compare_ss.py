@@ -32,6 +32,13 @@ def main():
         type=str,
         required=True,
     )
+    parser.add_argument(
+        "-c",
+        "--csv",
+        help="csv file containing pdb information created in advance",
+        type=str,
+        required=False,
+    )
     args = parser.parse_args()
     pdb_dir_path = Path(args.pdb)
     af_dir_path = Path(args.af)
@@ -39,17 +46,21 @@ def main():
     log = Path.cwd() / f"{Path(__file__).stem}.log"
     logger.add(log, rotation="1 MB", compression="zip")    
     
-    logger.info(f"Started getting info from PDB")
-    pdb_info_df = get_all_pdb_info()
-    all_chain_info_df = split_chain_in_dataframe(pdb_info_df=pdb_info_df)
+    if not args.csv:
+        csv_path = Path(args.csv)
+        all_chain_info_df = pd.read_csv(csv_path)
+    else:
+        logger.info(f"Started getting info from PDB")
+        pdb_info_df = get_all_pdb_info()
+        all_chain_info_df = split_chain_in_dataframe(pdb_info_df=pdb_info_df)
+        
     remove_dup_df = all_chain_info_df.sort_values("RESOLUTION").drop_duplicates(subset="UNIPROT ID", keep="first")
     logger.info(f"Finished getting info from PDB")
     
     logger.info(f"Started checking local database")
-    if check_local_pdb_db(
-        local_db_path=pdb_dir_path, 
-        pdb_info_df=pdb_info_df):
-        for pdb_id in check_local_pdb_db:
+    missing_pdbs = check_local_pdb_db(local_db_path=pdb_dir_path, pdb_info_df=pdb_info_df)
+    if missing_pdbs:
+        for pdb_id in missing_pdbs:
             logger.info(f"Download: {pdb_id}")
             download_pdb(local_db_path=pdb_dir_path, pdb_id=pdb_id)
     logger.info(f"Finished checking local database")
@@ -103,7 +114,7 @@ def main():
     plt.figure(figsize=(12,6))
     plt.bar(x, exp_H, width=0.4, label='Exp', align='center')
     plt.bar([i+0.4 for i in x], af_H, width=0.4, label='AlphaFold', align='center')
-    plt.ylabel("α-helix (%)")
+    plt.ylabel("alpha-helix (%)")
     plt.legend()
     plt.title("exp vs af")
     plt.tight_layout()
@@ -285,7 +296,7 @@ def split_chain_in_dataframe(pdb_info_df: pd.DataFrame) -> pd.DataFrame:
     """
 
     # Convert DataFrame rows to a list of dictionaries using itertuples for speed
-    pdb_info_rows = [row._asdict() for row in pdb_info_df.itertuples(index=False)]
+    pdb_info_rows = pdb_info_df.to_dict(orient="records")
     
     with Pool(processes=16) as pool:
         results = pool.map(convert_row, pdb_info_rows)
