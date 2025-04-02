@@ -74,6 +74,9 @@ def main():
         uniprot_id = str(row["UNIPROT ID"])
         
         exp_pdb = get_structure_in_dir(directory=pdb_dir_path, name=pdb_id)
+        if exp_pdb is None:
+             logger.warning(f"{pdb_id} is skipped (file does not exist)")
+             continue
         exp_structure = parser.get_structure('exp', exp_pdb)
         exp_chain = exp_structure[0][chain_id]
         
@@ -171,21 +174,28 @@ def download_pdb(local_db_path: Union[str, Path], pdb_id: str) -> None:
         local_db_path (Union[str, Path]): The directory path where the PDB file will be stored.
         pdb_id (str): The PDB ID of the structure to download.
 
-    Raises:
-        Exception: If the HTTP request fails with a status code other than 200.
+    Returns:
+        None. In case of errors, messages are logged instead of raising exceptions.
     """
     local_db_path = Path(local_db_path)
     local_db_path.mkdir(parents=True, exist_ok=True)
     download_path = local_db_path / f"{pdb_id}.pdb"
     url = f"https://files.rcsb.org/download/{pdb_id}.pdb"
     
-
-    response = requests.get(url)    
-    if response.status_code == 200:
-        with open(download_path, "w", encoding=response.encoding if response.encoding else "utf-8") as f:
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+    except requests.RequestException as e:
+        logger.warning(f"Failed to download PDB file for {pdb_id}. Error: {e}")
+        return
+    
+    try:
+        encoding = response.encoding if response.encoding else "utf-8"
+        with open(download_path, "w", encoding=encoding) as f:
             f.write(response.text)
-    else:
-        raise Exception(f"Failed to download PDB file for {pdb_id}. HTTP Status Code: {response.status_code}")
+        logger.info(f"Successfully downloaded PDB file for {pdb_id} to {download_path}")
+    except Exception as e:
+        logger.error(f"Failed to write PDB file for {pdb_id}. Error: {e}")
     
 def download_af_structure(out_dir_path: Union[str, Path], uniprot_id: str) -> None:
     """
