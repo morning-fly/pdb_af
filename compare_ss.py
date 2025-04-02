@@ -56,6 +56,7 @@ def main():
         all_chain_info_df = split_chain_in_dataframe(pdb_info_df=pdb_info_df)
         
     remove_dup_df = all_chain_info_df.sort_values("RESOLUTION").drop_duplicates(subset="UNIPROT ID", keep="first")
+    remove_dup_df.to_csv("remove_duplicated_info.csv")
     logger.info(f"Finished getting info from PDB")
     
     logger.info(f"Started checking local database")
