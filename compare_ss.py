@@ -49,7 +49,7 @@ def main():
     af_dir_path = Path(args.af)
     
     log = Path.cwd() / f"{Path(__file__).stem}.log"
-    logger.add(log, rotation="1 MB", compression="zip")    
+    logger.add(log)    
     
     logger.info(f"Started getting info from PDB")
     pdb_info_df = get_all_pdb_info()
@@ -293,7 +293,7 @@ def cif2pdb_bychain(cif_file: Union[str, Path]) -> None:
             
             # Copy the chain and set its ID to "A"
             new_chain = chain.copy()
-            new_chain.id = "A"
+            new_chain.id = "A"[0]
             
             new_model.add(new_chain)
             new_structure.add(new_model)
@@ -577,7 +577,7 @@ def analyze_ss_from_chain(chain: Chain, pdb_id: str, source_tag: str) -> Dict[st
     structure = parser.get_structure('temp', temp_file)
     model = structure[0]
     try:
-        dssp = DSSP(model, temp_file, dssp="dssp")
+        dssp = DSSP(model, temp_file, dssp="mkdssp")
     except Exception as e:
         print(f"DSSP failed for {pdb_id} chain {chain.id} ({source_tag}): {e}")
         shutil.rmtree(tmp_dir)
