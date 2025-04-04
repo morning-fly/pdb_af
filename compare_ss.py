@@ -4,15 +4,20 @@ import requests
 import argparse
 import tempfile
 import shutil
-from Bio.PDB import PDBParser, DSSP, PDBIO, Select
+from functools import partial
+from Bio.PDB import PDBParser, DSSP, PDBIO, Select, MMCIFParser
 from Bio.PDB.Chain import Chain
 from Bio.PDB.Residue import Residue
+from Bio.PDB.Structure import Structure
+from Bio.PDB.Model import Model
 import pandas as pd
 import matplotlib.pyplot as plt
 from pathlib import Path
 from typing import Union, Optional, Dict, Tuple, List, Any
 from loguru import logger
 from multiprocessing import Pool
+import warnings
+from Bio.PDB.PDBExceptions import PDBConstructionWarning
 
 def main():
     parser = argparse.ArgumentParser(
@@ -54,53 +59,18 @@ def main():
         all_chain_info_df = pd.read_csv(csv_path)
     else:
         all_chain_info_df = split_chain_in_dataframe(pdb_info_df=pdb_info_df)
-        
-    remove_dup_df = all_chain_info_df.sort_values("RESOLUTION").drop_duplicates(subset="UNIPROT ID", keep="first")
+    
+    filtered_df = all_chain_info_df[all_chain_info_df['EXPERIMENT TYPE (IF NOT X-RAY)'].isin(['X-RAY DIFFRACTION', 'ELECTRON MICROSCOPY'])]
+    filtered_df = filtered_df.copy()
+    filtered_df["RESOLUTION"] = filtered_df["RESOLUTION"].astype("float")
+    remove_dup_df = filtered_df.sort_values("RESOLUTION").drop_duplicates(subset="UNIPROT ID", keep="first")
     remove_dup_df.to_csv("remove_duplicated_info.csv")
     logger.info(f"Finished getting info from PDB")
     
-    logger.info(f"Started checking local database")
-    missing_pdbs = check_local_pdb_db(local_db_path=pdb_dir_path, pdb_info_df=pdb_info_df)
-    if missing_pdbs:
-        for pdb_id in missing_pdbs:
-            logger.info(f"Download: {pdb_id}")
-            download_pdb(local_db_path=pdb_dir_path, pdb_id=pdb_id)
-    logger.info(f"Finished checking local database")
-    
-    results = []
-    parser = PDBParser(QUIET=True)
-    for _, row in remove_dup_df.iterrows():
-        pdb_id = str(row["IDCODE"])
-        chain_id = str(row["CHAIN"])
-        uniprot_id = str(row["UNIPROT ID"])
-        
-        exp_pdb = get_structure_in_dir(directory=pdb_dir_path, name=pdb_id)
-        if exp_pdb is None:
-             logger.warning(f"{pdb_id} is skipped (file does not exist)")
-             continue
-        exp_structure = parser.get_structure('exp', exp_pdb)
-        exp_chain = exp_structure[0][chain_id]
-        
-        download_af_structure(out_dir_path=af_dir_path, uniprot_id=uniprot_id)
-        af_pdb = get_structure_in_dir(directory=af_dir_path, name=uniprot_id)
-        af_structure = parser.get_structure('af', af_pdb)
-        af_chain = af_structure[0]["A"]
-        
-        trimmed_residues = trim_af_structure(exp_chain, af_chain)
-        trimmed_af_chain = create_chain_from_residues(trimmed_residues, chain_id)
-        
-        exp_ss = analyze_ss_from_chain(exp_chain, pdb_id, "exp")
-        af_ss = analyze_ss_from_chain(trimmed_af_chain, pdb_id, "af")
-
-        result = {
-            'pdb_id': pdb_id,
-            'chain_id': chain_id,
-            'uniprot_id': uniprot_id,
-            'exp_secondary': exp_ss,
-            'af_secondary': af_ss
-        }
-        results.append(result)
-        logger.info(f"Analysis of {pdb_id}_{chain_id} is completed")
+    remove_dup_rows = remove_dup_df.to_dict(orient="records")
+    partial_main = partial(main_flow, pdb_dir_path, af_dir_path)
+    with Pool(processes=16) as pool:
+        results = pool.map(partial_main,  remove_dup_rows)
         
     results_df = pd.DataFrame(results)
     results_df.to_csv("ss_comparison_allchains.csv", index=False)
@@ -124,7 +94,101 @@ def main():
     plt.title("exp vs af")
     plt.tight_layout()
     plt.savefig("exp_vs_af_helix.pdf")
+
+def main_flow(pdb_dir_path: Union[str, Path], af_dir_path: Union[str, Path], row_dict: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Main processing flow for comparing experimental and AlphaFold structures.
     
+    This function performs the following steps:
+      1. Download the experimental mmCIF file from RCSB using the provided PDB ID.
+      2. Convert the mmCIF file to PDB format by chain if it has not been converted already.
+      3. Load the experimental structure and extract the specified chain.
+      4. Download the corresponding AlphaFold structure using the UniProt ID.
+      5. Load the AlphaFold structure and extract the chain (forced as chain "A").
+      6. Trim the AlphaFold structure to align with the experimental chain.
+      7. Analyze the secondary structure for both experimental and trimmed AlphaFold chains.
+      8. Return a dictionary containing the PDB ID, chain ID, UniProt ID, and secondary structure analyses.
+      
+    Args:
+        pdb_dir_path (Union[str, Path]): Directory path where experimental files are stored.
+        af_dir_path (Union[str, Path]): Directory path where AlphaFold files are stored.
+        row_dict (Dict[str, Any]): A dictionary containing keys "IDCODE", "CHAIN", and "UNIPROT ID".
+    
+    Returns:
+        Optional[Dict[str, Any]]: A dictionary with analysis results if successful; otherwise, None.
+    """
+    # Initialize the PDB parser (QUIET mode suppresses warnings)
+    parser = PDBParser(QUIET=True)
+    pdb_id = str(row_dict["IDCODE"])
+    chain_id = str(row_dict["CHAIN"])
+    uniprot_id = str(row_dict["UNIPROT ID"])
+    logger.info(f"Processing {pdb_id}_{chain_id}")
+
+    try:
+        # 1. Download the experimental mmCIF file
+        exp_cif = download_cif(local_db_path=pdb_dir_path, pdb_id=pdb_id)
+        if exp_cif is None:
+            logger.warning(f"{pdb_id}_{chain_id} is skipped (mmCIF file could not be downloaded)")
+            return None
+
+        # 2. Convert mmCIF to PDB by chain if not already done
+        cif_dir = exp_cif.parent
+        if not any(cif_dir.glob(f"{pdb_id}_*.pdb")):
+            cif2pdb_bychain(cif_file=exp_cif)
+
+        # 3. Retrieve the experimental PDB file by name
+        pdb_name = f"{pdb_id}_{chain_id}"
+        exp_pdb = get_structure_in_dir(directory=cif_dir, name=pdb_name)
+        if exp_pdb is None:
+            logger.warning(f"{pdb_id}_{chain_id} is skipped (PDB file does not exist)")
+            return None
+
+        exp_structure = parser.get_structure('exp', exp_pdb)
+        try:
+            # Here, we assume the chain in the experimental structure is forced to "A"
+            exp_chain = exp_structure[0]["A"]
+        except KeyError:
+            logger.warning(f"{pdb_id}_{chain_id} is skipped (chain {chain_id} not found in experimental structure)")
+            return None
+
+        # 4. Download the corresponding AlphaFold structure file
+        af_pdb = download_af_structure(out_dir_path=af_dir_path, uniprot_id=uniprot_id)
+        if af_pdb is None:
+            logger.warning(f"{pdb_id}_{chain_id} is skipped (AlphaFold file does not exist)")
+            return None
+
+        # 5. Load the AlphaFold structure and extract chain "A"
+        af_structure = parser.get_structure('af', af_pdb)
+        try:
+            af_chain = af_structure[0]["A"]
+        except KeyError:
+            logger.warning(f"{pdb_id}_{chain_id} is skipped (chain A not found in AlphaFold structure)")
+            return None
+
+        # 6. Trim the AlphaFold structure to align with the experimental chain
+        trimmed_residues = trim_af_structure(exp_chain, af_chain)
+        trimmed_af_chain = create_chain_from_residues(trimmed_residues, chain_id)
+
+        # 7. Analyze secondary structure for both experimental and AlphaFold (trimmed) chains
+        exp_ss = analyze_ss_from_chain(exp_chain, pdb_id, "exp")
+        af_ss = analyze_ss_from_chain(trimmed_af_chain, pdb_id, "af")
+
+        # 8. Prepare and return the result dictionary
+        result = {
+            'pdb_id': pdb_id,
+            'chain_id': chain_id,
+            'uniprot_id': uniprot_id,
+            'exp_secondary': exp_ss,
+            'af_secondary': af_ss
+        }
+        logger.info(f"Completed analysis for {pdb_id}_{chain_id}")
+    
+    except Exception as e:
+        logger.error(f"Error processing {pdb_id}_{chain_id}: {e}")
+        return None
+
+    return result
+
 def get_all_pdb_info() -> pd.DataFrame:
     """Retrieve all deposited structure information from the PDB.
 
@@ -197,8 +261,95 @@ def download_pdb(local_db_path: Union[str, Path], pdb_id: str) -> None:
         logger.info(f"Successfully downloaded PDB file for {pdb_id} to {download_path}")
     except Exception as e:
         logger.error(f"Failed to write PDB file for {pdb_id}. Error: {e}")
+
+def cif2pdb_bychain(cif_file: Union[str, Path]) -> None:
+    """
+    Convert each chain from an mmCIF file into a separate PDB file.
+    In each resulting PDB file, the chain ID is forced to "A".
+    The output filename includes the original chain ID for reference.
     
-def download_af_structure(out_dir_path: Union[str, Path], uniprot_id: str) -> None:
+    Args:
+        cif_file (Union[str, Path]): Path to the input mmCIF file.
+    """
+    warnings.simplefilter("ignore", PDBConstructionWarning)
+    cif_file_path = Path(cif_file)
+    if not cif_file_path.exists():
+        raise FileNotFoundError(f"The file {cif_file_path} does not exist.")
+    
+    pdb_id = cif_file_path.stem
+    parser = MMCIFParser()
+    structure_id = pdb_id
+    
+    # Parse the mmCIF file to get the structure
+    structure = parser.get_structure(structure_id, cif_file_path)
+    io = PDBIO()
+    
+    # Iterate over each model and chain in the structure
+    for model in structure:
+        for chain in model:
+            # Create a new structure and model for each chain so it can be saved as an individual PDB file
+            new_structure = Structure(structure_id)
+            new_model = Model(0)
+            
+            # Copy the chain and set its ID to "A"
+            new_chain = chain.copy()
+            new_chain.id = "A"
+            
+            new_model.add(new_chain)
+            new_structure.add(new_model)
+            
+            # Create an output filename that includes the original chain ID for reference
+            pdb_filename = cif_file_path.parent / f"{structure_id}_{chain.id}.pdb"
+            io.set_structure(new_structure)
+            io.save(str(pdb_filename))  # Convert Path to string to avoid 'write' attribute error
+            print(f"{pdb_id} Chain {chain.id} saved as {pdb_filename}")
+   
+def download_cif(local_db_path: Union[str, Path], pdb_id: str) -> Optional[Path]:
+    """
+    Download an mmCIF file from RCSB and save it to the specified local directory.
+
+    Args:
+        local_db_path (Union[str, Path]): The directory where the mmCIF file will be saved.
+        pdb_id (str): The PDB ID of the structure to download.
+
+    Returns:
+        Optional[Path]: The path to the saved mmCIF file if successful; otherwise, None.
+    """
+    # Convert local_db_path to a Path object and create the directory if it doesn't exist
+    local_db_path = Path(local_db_path)
+    local_db_path.mkdir(parents=True, exist_ok=True)
+    
+    # Create a subdirectory for the specific pdb_id
+    pdb_dir_path = local_db_path / pdb_id
+    pdb_dir_path.mkdir(parents=True, exist_ok=True)
+    
+    # Define the download path for the mmCIF file
+    download_path = pdb_dir_path / f"{pdb_id}.cif"
+    
+    # If the file already exists, return its path
+    if download_path.is_file():
+        return download_path
+
+    url = f"https://files.rcsb.org/download/{pdb_id}.cif"
+    
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+    except requests.RequestException as e:
+        logger.warning(f"Failed to download mmCIF file for {pdb_id}. Error: {e}")
+        return None
+    
+    try:
+        encoding = response.encoding if response.encoding else "utf-8"
+        with open(download_path, "w", encoding=encoding) as f:
+            f.write(response.text)
+        logger.info(f"Successfully downloaded mmCIF file for {pdb_id} to {download_path}")
+        return download_path
+    except Exception as e:
+        logger.error(f"Failed to write mmCIF file for {pdb_id}. Error: {e}")
+        return None
+
+def download_af_structure(out_dir_path: Union[str, Path], uniprot_id: str) -> Optional[Path]:
     """
     Download an AlphaFold structure file from the EBI AlphaFold website and save it in the specified directory.
     
@@ -206,21 +357,31 @@ def download_af_structure(out_dir_path: Union[str, Path], uniprot_id: str) -> No
         out_dir_path (Union[str, Path]): The directory where the AlphaFold structure file will be saved.
         uniprot_id (str): The UniProt ID of the protein structure.
         
-    Raises:
-        Exception: If the HTTP request fails (status code is not 200).
+    Returns:
+        Optional[Path]: The path to the saved structure file if successful; otherwise, None.
     """
+    # Convert out_dir_path to a Path object and ensure the directory exists
     out_dir_path = Path(out_dir_path)
     out_dir_path.mkdir(parents=True, exist_ok=True)
+    
+    # Define the download path for the PDB file
     download_path = out_dir_path / f"{uniprot_id}.pdb"
     
+    # If the file does not already exist, attempt to download it
     if not download_path.exists():
         url = f"https://alphafold.ebi.ac.uk/files/AF-{uniprot_id}-F1-model_v4.pdb"
         response = requests.get(url)
         if response.status_code == 200:
-            with open(download_path, "w", encoding=response.encoding if response.encoding else "utf-8") as f:
+            # Determine the encoding, default to "utf-8" if not provided
+            encoding = response.encoding if response.encoding else "utf-8"
+            with open(download_path, "w", encoding=encoding) as f:
                 f.write(response.text)
+            return download_path
         else:
-            raise Exception(f"Failed to download AF structure file for {uniprot_id}. HTTP Status Code: {response.status_code}")
+            logger.error(f"Failed to download AF structure file for {uniprot_id}. HTTP Status Code: {response.status_code}")
+            return None
+    # Return the download path if the file already exists
+    return download_path
     
 def map_pdb_to_uniprot_allchains(pdb_id: str) -> Optional[Dict[str, Dict[str, int]]]:
     """
