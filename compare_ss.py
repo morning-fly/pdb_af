@@ -10,6 +10,8 @@ from Bio.PDB.Chain import Chain
 from Bio.PDB.Residue import Residue
 from Bio.PDB.Structure import Structure
 from Bio.PDB.Model import Model
+from Bio.PDB import PPBuilder
+from Bio.Align import PairwiseAligner
 import pandas as pd
 import matplotlib.pyplot as plt
 from pathlib import Path
@@ -71,7 +73,8 @@ def main():
     partial_main = partial(main_flow, pdb_dir_path, af_dir_path)
     with Pool(processes=16) as pool:
         results = pool.map(partial_main,  remove_dup_rows)
-        
+    
+    results = [r for r in results if r is not None]
     results_df = pd.DataFrame(results)
     results_df.to_csv("ss_comparison_allchains.csv", index=False)
 
@@ -166,8 +169,8 @@ def main_flow(pdb_dir_path: Union[str, Path], af_dir_path: Union[str, Path], row
             return None
 
         # 6. Trim the AlphaFold structure to align with the experimental chain
-        trimmed_residues = trim_af_structure(exp_chain, af_chain)
-        trimmed_af_chain = create_chain_from_residues(trimmed_residues, chain_id)
+        trimmed_residues = trim_af_structure_by_alignment(exp_chain, af_chain)
+        trimmed_af_chain = create_chain_from_residues(trimmed_residues, "A")
 
         # 7. Analyze secondary structure for both experimental and AlphaFold (trimmed) chains
         exp_ss = analyze_ss_from_chain(exp_chain, pdb_id, "exp")
@@ -595,19 +598,131 @@ def analyze_ss_from_chain(chain: Chain, pdb_id: str, source_tag: str) -> Dict[st
     shutil.rmtree(tmp_dir)
     return percentages
 
-def trim_af_structure(exp_chain: Chain, af_chain: Chain) -> List[Residue]:
+def get_chain_sequence_and_residues(chain: Chain) -> Tuple[str, List[Residue]]:
     """
-    Trim the AlphaFold chain by retaining only those residues that are present in the experimental chain.
-    
+    Extracts the concatenated polypeptide sequence and the corresponding list of Residue objects
+    from the given chain.
+
     Args:
-        exp_chain (Chain): The experimental chain containing the reference residues.
-        af_chain (Chain): The AlphaFold chain to be trimmed.
-    
+        chain (Chain): The target chain object.
+
     Returns:
-        List[Residue]: A list of residues from the AlphaFold chain that have matching residue IDs in the experimental chain.
+        Tuple[str, List[Residue]]: The concatenated amino acid sequence and the corresponding list of Residue objects.
     """
-    exp_res_ids = [res.id for res in exp_chain]
-    trimmed_residues = [res for res in af_chain if res.id in exp_res_ids]
+    ppb = PPBuilder()
+    seq = ""
+    residues = []
+    for peptide in ppb.build_peptides(chain):
+        # Concatenate peptide fragments if multiple fragments exist
+        seq += str(peptide.get_sequence())
+        residues.extend(peptide)
+    return seq, residues
+
+def trim_af_structure_by_alignment(exp_chain: Chain, af_chain: Chain) -> List[Residue]:
+    """
+    Performs a global alignment between the experimental chain (exp_chain) and the AlphaFold chain (af_chain)
+    and extracts only the AlphaFold residues corresponding to regions present in the experimental structure.
+
+    Note: This function assumes the alignment output is in blocks separated by blank lines,
+    with each block containing 3 lines:
+      - Line 1: target (experimental) with a header (e.g., "target   0 ...")
+      - Line 2: match line (ignored)
+      - Line 3: query (AlphaFold) with a header (e.g., "query    0 ...")
+    Blocks that contain trailing numeric tokens (as in the final block) are skipped.
+
+    Args:
+        exp_chain (Chain): The experimental chain.
+        af_chain (Chain): The AlphaFold predicted chain.
+
+    Returns:
+        List[Residue]: A list of AlphaFold Residue objects corresponding to the regions present in the experimental structure.
+    """
+    # Suppress PDB construction warnings
+    warnings.simplefilter("ignore", PDBConstructionWarning)
+
+    # Extract sequences and residue lists from both chains.
+    # Assumes get_chain_sequence_and_residues() returns a tuple (sequence, residue_list).
+    exp_seq, _ = get_chain_sequence_and_residues(exp_chain)
+    af_seq, af_residues = get_chain_sequence_and_residues(af_chain)
+
+    # Perform global alignment using PairwiseAligner.
+    aligner = PairwiseAligner()
+    aligner.mode = 'global'
+    aligner.match_score = 1
+    aligner.mismatch_score = 0
+    aligner.open_gap_score = -5
+    aligner.extend_gap_score = -1
+
+    alignments = aligner.align(exp_seq, af_seq)
+    best_alignment = alignments[0]
+
+    # Convert the alignment to a string and split it into lines.
+    alignment_str = str(best_alignment)
+    lines = alignment_str.splitlines()
+
+    aligned_exp_full = ""
+    aligned_af_full = ""
+    block = []  # Temporary container for lines within each alignment block
+
+    # Process alignment blocks separated by empty lines.
+    for line in lines:
+        if line.strip() == "":
+            # Process the current block if it contains at least 3 lines.
+            if len(block) >= 3:
+                target_line = block[0]
+                query_line = block[2]
+                # Split each line into up to 3 parts: header, position, and aligned sequence.
+                target_parts = target_line.split(maxsplit=2)
+                query_parts = query_line.split(maxsplit=2)
+                if len(target_parts) < 3 or len(query_parts) < 3:
+                    logger.warning("Incomplete alignment block encountered and skipped.")
+                else:
+                    target_seq = target_parts[2].strip()
+                    query_seq = query_parts[2].strip()
+                    # Skip the block if the last token in the target aligned sequence is numeric.
+                    if target_seq.split() and target_seq.split()[-1].isdigit():
+                        logger.debug("Skipping block with trailing numeric tokens.")
+                    else:
+                        aligned_exp_full += target_seq
+                        aligned_af_full += query_seq
+            block = []  # Reset the block for the next alignment segment.
+        else:
+            block.append(line)
+
+    # Process the final block if it is not terminated by an empty line.
+    if block and len(block) >= 3:
+        target_line = block[0]
+        query_line = block[2]
+        target_parts = target_line.split(maxsplit=2)
+        query_parts = query_line.split(maxsplit=2)
+        if len(target_parts) < 3 or len(query_parts) < 3:
+            logger.warning("Incomplete final alignment block encountered and skipped.")
+        else:
+            target_seq = target_parts[2].strip()
+            query_seq = query_parts[2].strip()
+            if target_seq.split() and target_seq.split()[-1].isdigit():
+                logger.debug("Skipping final block with trailing numeric tokens.")
+            else:
+                aligned_exp_full += target_seq
+                aligned_af_full += query_seq
+
+    # Ensure the aligned sequences have the same length.
+    if len(aligned_exp_full) != len(aligned_af_full):
+        raise ValueError("Aligned sequences have different lengths.")
+
+    # Determine which positions in the aligned AlphaFold sequence correspond to actual residues.
+    af_counter = 0
+    indices_to_keep = []  # List of indices in af_residues to keep.
+    for pos in range(len(aligned_af_full)):
+        if aligned_af_full[pos] != "-":
+            # Consider the position only if the experimental aligned sequence also has a residue.
+            if aligned_exp_full[pos] != "-":
+                indices_to_keep.append(af_counter)
+            af_counter += 1  # Increment the counter only when a residue (non-gap) is encountered.
+        # Do not increment af_counter for gaps in the AlphaFold alignment.
+
+    # Extract Residue objects from af_residues corresponding to the selected indices.
+    trimmed_residues = [af_residues[i] for i in indices_to_keep]
     return trimmed_residues
 
 def create_chain_from_residues(residues: List[Residue], chain_id: str) -> Chain:
