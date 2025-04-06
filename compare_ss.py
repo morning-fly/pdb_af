@@ -624,11 +624,8 @@ def trim_af_structure_by_alignment(exp_chain: Chain, af_chain: Chain) -> List[Re
     and extracts only the AlphaFold residues corresponding to regions present in the experimental structure.
 
     Note: This function assumes the alignment output is in blocks separated by blank lines,
-    with each block containing 3 lines:
-      - Line 1: target (experimental) with a header (e.g., "target   0 ...")
-      - Line 2: match line (ignored)
-      - Line 3: query (AlphaFold) with a header (e.g., "query    0 ...")
-    Blocks that contain trailing numeric tokens (as in the final block) are skipped.
+    with each block containing 3 lines. The lines can be in header format (e.g., "target   0 ...")
+    or plain aligned sequences. Blocks that contain trailing numeric tokens (as in the final block) are skipped.
 
     Args:
         exp_chain (Chain): The experimental chain.
@@ -637,15 +634,16 @@ def trim_af_structure_by_alignment(exp_chain: Chain, af_chain: Chain) -> List[Re
     Returns:
         List[Residue]: A list of AlphaFold Residue objects corresponding to the regions present in the experimental structure.
     """
+
     # Suppress PDB construction warnings
     warnings.simplefilter("ignore", PDBConstructionWarning)
 
     # Extract sequences and residue lists from both chains.
-    # Assumes get_chain_sequence_and_residues() returns a tuple (sequence, residue_list).
+    # It is assumed that get_chain_sequence_and_residues() returns a tuple (sequence, residue_list).
     exp_seq, _ = get_chain_sequence_and_residues(exp_chain)
     af_seq, af_residues = get_chain_sequence_and_residues(af_chain)
 
-    # Perform global alignment using PairwiseAligner.
+    # Perform global alignment using PairwiseAligner
     aligner = PairwiseAligner()
     aligner.mode = 'global'
     aligner.match_score = 1
@@ -656,7 +654,7 @@ def trim_af_structure_by_alignment(exp_chain: Chain, af_chain: Chain) -> List[Re
     alignments = aligner.align(exp_seq, af_seq)
     best_alignment = alignments[0]
 
-    # Convert the alignment to a string and split it into lines.
+    # Convert the alignment to a string and split into lines
     alignment_str = str(best_alignment)
     lines = alignment_str.splitlines()
 
@@ -664,47 +662,59 @@ def trim_af_structure_by_alignment(exp_chain: Chain, af_chain: Chain) -> List[Re
     aligned_af_full = ""
     block = []  # Temporary container for lines within each alignment block
 
-    # Process alignment blocks separated by empty lines.
+    # Process alignment blocks separated by empty lines
     for line in lines:
         if line.strip() == "":
-            # Process the current block if it contains at least 3 lines.
+            # Process the current block if it contains at least 3 lines
             if len(block) >= 3:
                 target_line = block[0]
                 query_line = block[2]
-                # Split each line into up to 3 parts: header, position, and aligned sequence.
+                # Check if the line contains header info (if so, split; otherwise, use the line directly)
                 target_parts = target_line.split(maxsplit=2)
                 query_parts = query_line.split(maxsplit=2)
-                if len(target_parts) < 3 or len(query_parts) < 3:
-                    logger.warning("Incomplete alignment block encountered and skipped.")
-                else:
+                if len(target_parts) == 1:
+                    target_seq = target_line.strip()
+                elif len(target_parts) >= 3:
                     target_seq = target_parts[2].strip()
+                else:
+                    target_seq = ""
+                if len(query_parts) == 1:
+                    query_seq = query_line.strip()
+                elif len(query_parts) >= 3:
                     query_seq = query_parts[2].strip()
-                    # Skip the block if the last token in the target aligned sequence is numeric.
-                    if target_seq.split() and target_seq.split()[-1].isdigit():
-                        logger.debug("Skipping block with trailing numeric tokens.")
-                    else:
-                        aligned_exp_full += target_seq
-                        aligned_af_full += query_seq
-            block = []  # Reset the block for the next alignment segment.
+                else:
+                    query_seq = ""
+                # Skip the block if the last token of target_seq is numeric
+                if target_seq.split() and target_seq.split()[-1].isdigit():
+                    logger.debug("Skipping block with trailing numeric tokens.")
+                else:
+                    aligned_exp_full += target_seq
+                    aligned_af_full += query_seq
+            block = []  # Reset the block for the next alignment segment
         else:
             block.append(line)
 
-    # Process the final block if it is not terminated by an empty line.
+    # Process the final block if not terminated by an empty line
     if block and len(block) >= 3:
         target_line = block[0]
         query_line = block[2]
         target_parts = target_line.split(maxsplit=2)
         query_parts = query_line.split(maxsplit=2)
-        if len(target_parts) < 3 or len(query_parts) < 3:
-            logger.warning("Incomplete final alignment block encountered and skipped.")
-        else:
+        if len(target_parts) == 1:
+            target_seq = target_line.strip()
+        elif len(target_parts) >= 3:
             target_seq = target_parts[2].strip()
+        else:
+            target_seq = ""
+        if len(query_parts) == 1:
+            query_seq = query_line.strip()
+        elif len(query_parts) >= 3:
             query_seq = query_parts[2].strip()
-            if target_seq.split() and target_seq.split()[-1].isdigit():
-                logger.debug("Skipping final block with trailing numeric tokens.")
-            else:
-                aligned_exp_full += target_seq
-                aligned_af_full += query_seq
+        else:
+            query_seq = ""
+        if not (target_seq.split() and target_seq.split()[-1].isdigit()):
+            aligned_exp_full += target_seq
+            aligned_af_full += query_seq
 
     # Ensure the aligned sequences have the same length.
     if len(aligned_exp_full) != len(aligned_af_full):
@@ -712,16 +722,16 @@ def trim_af_structure_by_alignment(exp_chain: Chain, af_chain: Chain) -> List[Re
 
     # Determine which positions in the aligned AlphaFold sequence correspond to actual residues.
     af_counter = 0
-    indices_to_keep = []  # List of indices in af_residues to keep.
+    indices_to_keep = []  # List of indices in af_residues to keep
     for pos in range(len(aligned_af_full)):
         if aligned_af_full[pos] != "-":
-            # Consider the position only if the experimental aligned sequence also has a residue.
+            # Consider this position only if the experimental aligned sequence is not a gap
             if aligned_exp_full[pos] != "-":
                 indices_to_keep.append(af_counter)
-            af_counter += 1  # Increment the counter only when a residue (non-gap) is encountered.
-        # Do not increment af_counter for gaps in the AlphaFold alignment.
+            af_counter += 1  # Increment counter only for non-gap characters
+        # Do not increment af_counter if a gap is encountered.
 
-    # Extract Residue objects from af_residues corresponding to the selected indices.
+    # Extract the Residue objects from af_residues corresponding to the selected indices.
     trimmed_residues = [af_residues[i] for i in indices_to_keep]
     return trimmed_residues
 
