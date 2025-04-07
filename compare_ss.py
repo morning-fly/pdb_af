@@ -4,6 +4,7 @@ import requests
 import argparse
 import tempfile
 import shutil
+import ast
 from functools import partial
 from Bio.PDB import PDBParser, DSSP, PDBIO, Select, MMCIFParser
 from Bio.PDB.Chain import Chain
@@ -80,21 +81,49 @@ def main():
 
     exp_H = []
     af_H = []
-    labels = []
-    for res in results:
-        exp_h = res['exp_secondary'].get('H', 0)
-        af_h = res['af_secondary'].get('H', 0)
+    for _, row in results_df.iterrows():
+        exp_ss_dict = ast.literal_eval(row['exp_secondary'])
+        af_ss_dict  = ast.literal_eval(row['af_secondary'])
+        exp_h = exp_ss_dict.get('H', 0)
+        af_h = af_ss_dict.get('H', 0)
         exp_H.append(exp_h)
         af_H.append(af_h)
-        labels.append(f"{res['pdb_id']}_{res['chain_id']}")
+
+    avg_exp = sum(exp_H) / len(exp_H)
+    avg_af  = sum(af_H) / len(af_H)
+    logger.info(f"Exp(avg): {avg_exp}, AF(avg): {avg_af}")
+
+    over_plot = 0
+    under_plot = 0
+    equal_plot = 0
+    for i in range(len(exp_H)):
+        if exp_H[i] > af_H[i]:
+            under_plot += 1
+        elif exp_H[i] < af_H[i]:
+            over_plot += 1
+        else:
+            equal_plot += 1
+        
+    logger.info(f"over plot: {over_plot}, under plot: {under_plot}, equal plot: {equal_plot}")
+    logger.info(f"total: {len(exp_H)}")
+
+    fig, axs = plt.subplots(1, 2, figsize=(14, 6))
+
+    axs[0].scatter(exp_H, af_H, s=20, alpha=0.6)
+    min_val = min(min(exp_H), min(af_H))
+    max_val = max(max(exp_H), max(af_H))
+    axs[0].plot([min_val, max_val], [min_val, max_val], 'r--', label='AF structure = \nexperimental structure')
+    axs[0].set_xlabel("Experimental Structure")
+    axs[0].set_ylabel("Predicted structure in AF")
+    axs[0].legend()
     
-    x = range(len(labels))
-    plt.figure(figsize=(12,6))
-    plt.bar(x, exp_H, width=0.4, label='Exp', align='center')
-    plt.bar([i+0.4 for i in x], af_H, width=0.4, label='AlphaFold', align='center')
-    plt.ylabel("alpha-helix (%)")
-    plt.legend()
-    plt.title("exp vs af")
+    labels = ["AF structure > \nexperimental structure", "AF structure < \nexperimental structure", "AF structure = \nexperimental structure"]
+    counts = [over_plot, under_plot, equal_plot]
+    axs[1].bar(labels, counts)
+    axs[1].set_ylabel("Structures")
+
+    fig.suptitle("Experimental vs Predicted Structure Analysis", fontsize=16)
+    plt.tight_layout()
     plt.tight_layout()
     plt.savefig("exp_vs_af_helix.pdf")
 
