@@ -170,7 +170,7 @@ def main_flow(pdb_dir_path: Union[str, Path], af_dir_path: Union[str, Path], row
 
         # 6. Trim the AlphaFold structure to align with the experimental chain
         trimmed_residues = trim_af_structure_by_alignment(exp_chain, af_chain)
-        trimmed_af_chain = create_chain_from_residues(trimmed_residues, chain_id)
+        trimmed_af_chain = create_chain_from_residues(trimmed_residues, "A")
 
         # 7. Analyze secondary structure for both experimental and AlphaFold (trimmed) chains
         exp_ss = analyze_ss_from_chain(exp_chain, pdb_id, "exp")
