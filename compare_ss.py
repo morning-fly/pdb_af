@@ -4,7 +4,6 @@ import requests
 import argparse
 import tempfile
 import shutil
-import ast
 from functools import partial
 from Bio.PDB import PDBParser, DSSP, PDBIO, Select, MMCIFParser
 from Bio.PDB.Chain import Chain
@@ -83,8 +82,8 @@ def main():
     exp_H = []
     af_H = []
     for _, row in results_df.iterrows():
-        exp_ss_dict = ast.literal_eval(row['exp_secondary'])
-        af_ss_dict  = ast.literal_eval(row['af_secondary'])
+        exp_ss_dict = row['exp_secondary']
+        af_ss_dict  = row['af_secondary']
         exp_h = exp_ss_dict.get('H', 0)
         af_h = af_ss_dict.get('H', 0)
         exp_H.append(exp_h)
