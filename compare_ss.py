@@ -21,6 +21,7 @@ from loguru import logger
 from multiprocessing import Pool
 import warnings
 from Bio.PDB.PDBExceptions import PDBConstructionWarning
+import multiprocessing
 
 def main():
     parser = argparse.ArgumentParser(
@@ -52,7 +53,7 @@ def main():
     af_dir_path = Path(args.af)
     
     log = Path.cwd() / f"{Path(__file__).stem}.log"
-    logger.add(log)    
+    logger.add(log, format="{time:YYYY-MM-DD HH:mm:ss} [{process.name}/{process.id}] {level}: {message}")    
     
     logger.info(f"Started getting info from PDB")
     pdb_info_df = get_all_pdb_info()
@@ -154,7 +155,8 @@ def main_flow(pdb_dir_path: Union[str, Path], af_dir_path: Union[str, Path], row
     pdb_id = str(row_dict["IDCODE"])
     chain_id = str(row_dict["CHAIN"])
     uniprot_id = str(row_dict["UNIPROT ID"])
-    logger.info(f"Processing {pdb_id}_{chain_id}")
+    current_proc = multiprocessing.current_process()
+    logger.info(f"Processing {pdb_id}_{chain_id}: {current_proc.name} (ID: {current_proc.pid})")
 
     try:
         # 1. Download the experimental mmCIF file
@@ -685,6 +687,7 @@ def trim_af_structure_by_alignment(exp_chain: Chain, af_chain: Chain) -> List[Re
 
     # Convert the alignment to a string and split into lines
     alignment_str = str(best_alignment)
+    logger.info(alignment_str)
     lines = alignment_str.splitlines()
 
     aligned_exp_full = ""
@@ -748,6 +751,11 @@ def trim_af_structure_by_alignment(exp_chain: Chain, af_chain: Chain) -> List[Re
     # Ensure the aligned sequences have the same length.
     if len(aligned_exp_full) != len(aligned_af_full):
         raise ValueError("Aligned sequences have different lengths.")
+    
+    identity = calculate_identity(aligned_exp_full, aligned_af_full)
+    if identity < 90:
+        logger.warning(f"sequence identity is not sufficient: {identity}%")
+        return []
 
     # Determine which positions in the aligned AlphaFold sequence correspond to actual residues.
     af_counter = 0
@@ -763,6 +771,39 @@ def trim_af_structure_by_alignment(exp_chain: Chain, af_chain: Chain) -> List[Re
     # Extract the Residue objects from af_residues corresponding to the selected indices.
     trimmed_residues = [af_residues[i] for i in indices_to_keep]
     return trimmed_residues
+
+def calculate_identity(aligned_seq1: str, aligned_seq2: str) -> float:
+    """
+    Calculate the percent identity between two aligned sequences, ignoring gaps.
+
+    Args:
+        aligned_seq1 (str): The first aligned sequence, with gaps represented by '-'.
+        aligned_seq2 (str): The second aligned sequence, with gaps represented by '-'.
+
+    Returns:
+        float: The percentage identity calculated only over positions without gaps (0 to 100).
+    """
+    # Initialize counters for match count and valid (non-gap) position count
+    match_count = 0
+    valid_count = 0
+    
+    # Loop over each pair of characters from both sequences
+    for a, b in zip(aligned_seq1, aligned_seq2):
+        # Skip the positions where either sequence has a gap
+        if a == '-' or b == '-':
+            continue
+        
+        valid_count += 1
+        if a == b:
+            match_count += 1
+
+    # Return 0.0 if there are no valid positions to avoid division by zero
+    if valid_count == 0:
+        return 0.0
+
+    # Calculate the percent identity
+    identity = (match_count / valid_count) * 100
+    return identity
 
 def create_chain_from_residues(residues: List[Residue], chain_id: str) -> Chain:
     """
