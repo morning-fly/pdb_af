@@ -767,8 +767,18 @@ def trim_af_structure_by_alignment(exp_chain: Chain, af_chain: Chain) -> List[Re
             af_counter += 1  # Increment counter only for non-gap characters
         # Do not increment af_counter if a gap is encountered.
 
-    # Extract the Residue objects from af_residues corresponding to the selected indices.
-    trimmed_residues = [af_residues[i] for i in indices_to_keep]
+    continuous_helix_seg_list = continuous_helix(chain=af_chain, pdb_id="test", source_tag="temp")
+    new_indices_to_keep = indices_to_keep.copy()
+    for helix_seg in continuous_helix_seg_list:
+        for i in indices_to_keep:
+            resi_num = i + 1
+            if resi_num in helix_seg:
+                new_indices_to_keep += [j - 1 for j in helix_seg]
+                break
+    new_indices_to_keep = sorted(list(set(new_indices_to_keep)))
+
+    # Extract the Residue objects from af_residues corresponding to the selected indices (not residue number).
+    trimmed_residues = [af_residues[i] for i in new_indices_to_keep]
     return trimmed_residues
 
 def calculate_identity(aligned_seq1: str, aligned_seq2: str) -> float:
@@ -819,6 +829,55 @@ def create_chain_from_residues(residues: List[Residue], chain_id: str) -> Chain:
     for res in residues:
         new_chain.add(res)
     return new_chain
+
+def continuous_helix(chain: Chain, pdb_id: str, source_tag: str) -> List[List[int]]:
+    """
+    Extract continuous alpha helix segments from a given chain using DSSP.
+    
+    This function writes the specified chain to a temporary PDB file,
+    adds a dummy CRYST1 record if needed, and runs DSSP to determine the secondary structure.
+    It returns a list of lists where each sub-list contains the DSSP indices (e.g., residue numbers)
+    of consecutive residues in an alpha helix.
+    
+    Args:
+        chain (Chain): A Bio.PDB Chain object representing the chain to analyze.
+        pdb_id (str): The PDB identifier.
+        source_tag (str): A tag indicating the source (e.g., "exp" for experimental, "af" for AlphaFold).
+    
+    Returns:
+        List[List[int]]: A list of continuous helical segments represented by their DSSP indices.
+                         Returns an empty list if DSSP processing fails.
+    """
+    temp_file, tmp_dir = write_chain_to_temp(chain=chain, pdb_id=pdb_id, source_tag=source_tag)
+    parser = PDBParser(QUIET=True)
+    structure = parser.get_structure('temp', temp_file)
+    model = structure[0]
+    try:
+        dssp = DSSP(model, temp_file, dssp="mkdssp")
+    except Exception as e:
+        print(f"DSSP failed for {pdb_id} chain {chain.id} ({source_tag}): {e}")
+        shutil.rmtree(tmp_dir)
+        return []
+    
+    helix_segments = []
+    current_segment = []
+
+    chain_keys = sorted([key for key in dssp.keys() if key[0] == chain.id], key=lambda k: dssp[k][0])
+    
+    for key in chain_keys:
+        ss = dssp[key][2]
+        if ss == 'H':
+            current_segment.append(dssp[key][0])
+        else:
+            if current_segment:
+                helix_segments.append(current_segment)
+                current_segment = []
+
+    if current_segment:
+        helix_segments.append(current_segment)
+    
+    shutil.rmtree(tmp_dir)
+    return helix_segments
 
 if __name__ == "__main__":
     main()
