@@ -1,0 +1,11 @@
+name: pdb_af_env
+channels:
+  - defaults
+  - conda-forge
+  - salilab
+dependencies:
+  - python=3.11
+  - biopython
+  - pandas
+  - requests
+  - dssp
