@@ -2,6 +2,12 @@
 
 Compare structures deposited in the PDB with AlphaFold2 predictions.
 
+## Create Conda Environment
+```bash
+conda env create -f environment.yml
+conda activate pdb_af_env
+```
+
 ## Build Database
 
 Create a local database of PDB and AlphaFold structures by downloading entries and mapping them to UniProt IDs:
@@ -19,6 +25,7 @@ python build_db.py -o <DB_DIR>
 └── all_chain_pdb_info.csv
     └─ mapping of PDB chains to UniProt IDs and sequence lengths
 ```
+⚠️ **warning:** The database is ~500GB in size.
 
 ## Compare Secondary‐Structure Percentages
 Analyze and compare secondary structure percentages between experimental and predicted models:  
