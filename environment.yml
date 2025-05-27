@@ -9,3 +9,6 @@ dependencies:
   - pandas
   - requests
   - dssp
+  - loguru
+  - matplotlib
+  - tqdm
