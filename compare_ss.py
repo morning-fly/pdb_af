@@ -25,7 +25,6 @@ from loguru import logger
 from multiprocessing import Pool
 import warnings
 from Bio.PDB.PDBExceptions import PDBConstructionWarning
-import numpy as np
 from functools import partial
 
 def main():
